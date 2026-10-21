@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>題庫(D1)</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f4f5f7;color:#222}
+.w{max-width:900px;margin:auto;padding:12px}
+.card{background:#fff;border-radius:10px;padding:14px;margin:12px 0;box-shadow:0 1px 3px #0002}
+textarea{width:100%;min-height:180px;box-sizing:border-box;font-size:15px;padding:8px}
+input,button,select{font-size:15px;padding:8px 12px;margin:3px;border-radius:6px;border:1px solid #888;background:#fff}
+button.p{background:#2563eb;color:#fff;border:0}
+button.d{background:#dc2626;color:#fff;border:0}
+.q{border-left:4px solid #2563eb;padding:8px 10px;margin:8px 0;background:#fafafa}
+.tag{font-size:12px;padding:2px 8px;border-radius:10px;background:#dbeafe;margin-right:6px}
+.a{color:#15803d;font-weight:600;white-space:pre-wrap}
+.bl{background:#fde68a;padding:0 10px;border-bottom:2px solid #b45309}
+.chs button{margin:2px}.chs button.on{background:#2563eb;color:#fff}
+#msg{color:#b45309}
+</style></head><body><div class="w">
+<h2>題庫整理工具(Cloudflare D1)</h2>
+<div class="card">密碼(寫入/刪除用):<input id="tok" type="password" placeholder="ADMIN_TOKEN" oninput="localStorage.setItem('tok',this.value)">
+<div id="msg"></div></div>
+
+<div class="card"><b>章節</b>
+<div class="chs" id="chs"></div>
+<div>新增:第 <input id="cnum" type="number" min="0" style="width:70px"> 章 <input id="ctitle" placeholder="章名(可留空)">
+<button class="p" onclick="addCh()">建立章節</button></div>
+<div><button class="d" onclick="delCh()">刪除目前章節(含題目)</button>
+<button class="d" onclick="clearCh()">只清空目前章節題目</button></div>
+</div>
+
+<div class="card"><b>貼上原始文字 → 加入目前章節</b>
+<textarea id="raw" placeholder="題目 / 你的答案 / 正確答案 / 得分"></textarea>
+<button class="p" onclick="parseRaw()">解析並加入</button><button onclick="raw.value=''">清空</button></div>
+
+<div class="card"><b>題庫</b>
+<select id="flt" onchange="render()"><option value="">全部類型</option><option>填空</option><option>單選</option><option>複選</option></select>
+<input id="kw" placeholder="搜尋" oninput="render()">
+<button onclick="reclass()">重新分類(目前章節)</button>
+<div id="stat"></div><div id="list"></div></div>
+
+<div class="card"><b>匯入 / 匯出</b><br>
+<button onclick="expJSON()">JSON</button><button onclick="expHTML()">手機版 HTML</button><button onclick="expMD()">Markdown</button><button onclick="expCSV()">CSV</button>
+<span>(範圍:目前選取的章節,選「全部」則匯出所有章)</span><br>
+匯入 JSON/CSV:<input type="file" accept=".json,.csv" onchange="imp(this)"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let chapters=[],qs=[],cur='all';
+$('tok').value=localStorage.getItem('tok')||'';
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const BLANK_SRC='[\\[［【(（]\\s*[_＿﹏]+\\s*\\d*\\s*[_＿﹏]*\\s*[\\]］】)）]|[_＿﹏]{2,}|\\[\\s*\\d+\\s*\\]';
+const hasBlank=q=>new RegExp(BLANK_SRC).test(q);
+const norm=s=>s.replace(/\s+/g,'').replace(/[，。,.？?：:;；！!（）()\[\]【】＿_]/g,'').toLowerCase();
+function classify(q,ans){
+ if(hasBlank(q))return'填空';
+ if(ans.length>1)return'複選';
+ if(/哪些|are correct|which of the following are|which of the following statements/i.test(q))return'複選';
+ return'單選';}
+const fmtQ=x=>{const e=esc(x.q);return x.type==='填空'?e.replace(new RegExp(BLANK_SRC,'g'),'<span class="bl">空格</span>'):e};
+const fmtA=x=>x.type==='填空'&&x.a.length>1?x.a.map((v,i)=>'空格'+(i+1)+':'+v):x.a;
+const chName=c=>'第'+c.num+'章'+(c.title?' '+c.title:'');
+const say=t=>{$('msg').textContent=t};
+async function api(path,method='GET',body){
+ const r=await fetch('/api/'+path,{method,headers:{'content-type':'application/json','x-token':$('tok').value},body:body?JSON.stringify(body):undefined});
+ const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
+async function load(){
+ try{const d=await api('data');chapters=d.chapters;qs=d.questions;
+  if(cur!=='all'&&!chapters.some(c=>c.id===cur))cur='all';render()}catch(e){say('讀取失敗:'+e.message)}}
+function selCh(id){cur=id;render()}
+async function addCh(){
+ const n=parseInt($('cnum').value);if(isNaN(n))return say('請輸入章節數字');
+ try{const c=await api('chapters','POST',{num:n,title:$('ctitle').value});cur=c.id;$('cnum').value='';$('ctitle').value='';await load();say('已建立/更新 '+chName(c))}catch(e){say(e.message)}}
+async function delCh(){
+ if(cur==='all')return say('請先選一個章節');
+ const c=chapters.find(x=>x.id===cur);const n=qs.filter(x=>x.chapter_id===cur).length;
+ if(!confirm('確定刪除「'+chName(c)+'」及其 '+n+' 題?無法復原'))return;
+ try{await api('chapters/'+cur,'DELETE');cur='all';await load();say('已刪除章節')}catch(e){say(e.message)}}
+async function clearCh(){
+ if(cur==='all')return say('請先選一個章節');
+ if(!confirm('清空此章全部題目?'))return;
+ try{const r=await api('chapters/'+cur+'/questions','DELETE');await load();say('已刪除 '+r.deleted+' 題')}catch(e){say(e.message)}}
+async function del(id){if(!confirm('刪除此題?'))return;try{await api('questions/'+id,'DELETE');await load()}catch(e){say(e.message)}}
+async function reclass(){
+ const l=qs.filter(x=>(cur==='all'||x.chapter_id===cur)&&classify(x.q,x.a)!==x.type);
+ try{for(const x of l)await api('questions/'+x.id,'PATCH',{type:classify(x.q,x.a)});await load();say('已更新 '+l.length+' 題分類')}catch(e){say(e.message)}}
+function parseBlocks(raw){
+ const t=raw.replace(/\r/g,'').replace(/[：]/g,':');
+ const out=[];let bad=0;
+ t.split(/^\s*(?=題目\s*:)/m).filter(b=>/^\s*題目\s*:/.test(b)).forEach(b=>{
+  const ia=b.search(/^\s*你的答案\s*:/m),ic=b.search(/^\s*正確答案\s*:/m),is=b.search(/^\s*得分\s*:/m);
+  if(ic<0){bad++;return}
+  const q=b.slice(0,ia>=0?ia:ic).replace(/^\s*題目\s*:/,'').trim();
+  const a=b.slice(ic,is>ic?is:b.length).replace(/^\s*正確答案\s*:/,'').split('\n').map(s=>s.trim()).filter(Boolean);
+  if(!q||!a.length){bad++;return}
+  out.push({q,a,type:classify(q,a)})});
+ return{out,bad}}
+async function parseRaw(){
+ if(cur==='all')return say('請先選一個章節再加入題目');
+ const {out,bad}=parseBlocks($('raw').value);
+ if(!out.length)return say('沒有解析到題目');
+ const have=new Set(qs.filter(x=>x.chapter_id===cur).map(x=>norm(x.q)));
+ const seen=new Set();let pre=0;
+ const items=out.filter(x=>{const k=norm(x.q);if(have.has(k)||seen.has(k)){pre++;return false}seen.add(k);return true});
+ try{const r=items.length?await api('questions','POST',{chapter_id:cur,items}):{added:0,duplicates:0};
+  await load();say('解析 '+out.length+' 題,新增 '+r.added+',重複略過 '+(pre+r.duplicates)+(bad?',格式錯誤 '+bad:''))}catch(e){say(e.message)}}
+function render(){
+ $('chs').innerHTML='<button class="'+(cur==='all'?'on':'')+'" onclick="selCh(\'all\')">全部 ('+qs.length+')</button>'+
+  chapters.map(c=>'<button class="'+(cur===c.id?'on':'')+'" onclick="selCh('+c.id+')">'+esc(chName(c))+' ('+qs.filter(x=>x.chapter_id===c.id).length+')</button>').join('');
+ const f=$('flt').value,k=$('kw').value.toLowerCase();
+ const base=qs.filter(x=>cur==='all'||x.chapter_id===cur);
+ const c={填空:0,單選:0,複選:0};base.forEach(x=>c[x.type]++);
+ $('stat').textContent='共 '+base.length+' 題|填空 '+c.填空+'・單選 '+c.單選+'・複選 '+c.複選;
+ const cm={};chapters.forEach(x=>cm[x.id]=x);
+ $('list').innerHTML=base.filter(x=>(!f||x.type===f)&&(!k||(x.q+x.a.join()).toLowerCase().includes(k)))
+ .map(x=>'<div class="q"><span class="tag">'+x.type+'</span>'+(cur==='all'&&cm[x.chapter_id]?'<span class="tag" style="background:#e5e7eb">第'+cm[x.chapter_id].num+'章</span>':'')+'<button class="d" onclick="del('+x.id+')" style="float:right">刪</button><div>'+fmtQ(x)+'</div><div class="a">答案:'+esc(fmtA(x).join(' ; '))+'</div></div>').join('')}
+function scope(){return chapters.filter(c=>cur==='all'||c.id===cur).map(c=>({c,l:qs.filter(x=>x.chapter_id===c.id)}))}
+function dl(name,txt,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type}));a.download=name;a.click()}
+function expJSON(){dl('questions.json',JSON.stringify({chapters:scope().map(({c,l})=>({num:c.num,title:c.title,questions:l.map(x=>({type:x.type,q:x.q,a:x.a}))}))},null,1),'application/json')}
+function expCSV(){const rows=[];scope().forEach(({c,l})=>l.forEach(x=>rows.push([c.num,c.title,x.type,x.q,x.a.join(' | ')].map(s=>'"'+String(s).replace(/"/g,'""')+'"').join(','))));
+ dl('questions.csv','\ufeff章,章名,類型,題目,答案\n'+rows.join('\n'),'text/csv')}
+function expMD(){let o='# 題庫\n\n';scope().forEach(({c,l})=>{o+='## '+chName(c)+'\n\n';['填空','單選','複選'].forEach(t=>{const z=l.filter(x=>x.type===t);if(!z.length)return;o+='### '+t+'\n\n';z.forEach((x,i)=>o+=(i+1)+'. '+x.q.replace(new RegExp(BLANK_SRC,'g'),'＿＿＿')+'\n   - **答案**:'+fmtA(x).join(' ; ')+'\n');o+='\n'})});dl('questions.md',o,'text/markdown')}
+function expHTML(){let b='';scope().forEach(({c,l})=>{b+='<h2>'+esc(chName(c))+'</h2>';['填空','單選','複選'].forEach(t=>{const z=l.filter(x=>x.type===t);if(!z.length)return;b+='<h3>'+t+' ('+z.length+')</h3>';z.forEach((x,i)=>b+='<div class=c><p><b>'+(i+1)+'.</b> '+fmtQ(x)+'</p><details><summary>顯示答案</summary><p class=a>'+fmtA(x).map(esc).join('<br>')+'</p></details></div>')})});
+ dl('questions_mobile.html','<!DOCTYPE html><html lang=zh-Hant><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>題庫</title><style>body{font-family:system-ui;margin:0;padding:10px;background:#f4f5f7;font-size:18px;line-height:1.6}.c{background:#fff;border-radius:10px;padding:10px 14px;margin:10px 0}summary{color:#2563eb;padding:6px 0}.a{color:#15803d;font-weight:600}.bl{background:#fde68a;padding:0 10px;border-bottom:2px solid #b45309}</style></head><body><h1>題庫</h1>'+b+'</body></html>','text/html')}
+function imp(el){
+ const f=el.files[0];if(!f)return;const r=new FileReader();
+ r.onload=async()=>{
+  let data=[];
+  try{
+   if(f.name.endsWith('.json')){data=JSON.parse(r.result).chapters||[]}
+   else{const m={};r.result.replace(/^\ufeff/,'').split(/\n(?=\d+,")/).slice(1).forEach(l=>{
+     const g=l.match(/^(\d+),"((?:[^"]|"")*)","((?:[^"]|"")*)","((?:[^"]|"")*)","((?:[^"]|"")*)"/);if(!g)return;
+     const n=+g[1];(m[n]=m[n]||{num:n,title:g[2].replace(/""/g,'"'),questions:[]}).questions.push({type:g[3],q:g[4].replace(/""/g,'"'),a:g[5].replace(/""/g,'"').split(' | ')})});data=Object.values(m)}
+  }catch(e){return say('檔案格式錯誤')}
+  try{let add=0,dup=0;
+   for(const ch of data){const c=await api('chapters','POST',{num:ch.num,title:ch.title||''});
+    const items=(ch.questions||[]).filter(x=>x.q&&x.a&&x.a.length).map(x=>({q:x.q,a:x.a,type:classify(x.q,x.a)}));
+    if(items.length){const z=await api('questions','POST',{chapter_id:c.id,items});add+=z.added;dup+=z.duplicates}}
+   await load();say('匯入完成:新增 '+add+',重複略過 '+dup)}catch(e){say(e.message)}};
+ r.readAsText(f);el.value=''}
+load();
+</script></body></html>
